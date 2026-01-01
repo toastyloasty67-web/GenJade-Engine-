@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SPDVAULT Map Gen</title>
+    <!-- JSZip for folder management -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --border: #000000;
+            --font: 'Courier New', Courier, monospace;
+        }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            font-family: var(--font);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+            user-select: none;
+        }
+
+        .legend {
+            position: absolute;
+            top: 15px;
+            display: flex;
+            gap: 12px;
+            font-size: 9px;
+            padding: 5px 10px;
+            background: #fff;
+            border: 1px solid var(--border);
+        }
+        .legend-item { display: flex; align-items: center; gap: 4px; }
+        .sq { width: 6px; height: 6px; border: 1px solid var(--border); }
+
+        #mapCanvas {
+            image-rendering: pixelated;
+            border: 1px solid var(--border);
+            cursor: pointer;
+            max-width: 85vw;
+            max-height: 75vh;
+        }
+
+        #explorerOverlay {
+            position: fixed;
+            inset: 0;
+            background: #fff;
+            z-index: 100;
+            display: none;
+        }
+        #explorerCanvas { cursor: grab; }
+        #explorerCanvas:active { cursor: grabbing; }
+
+        .ui-wrap {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            background: #fff;
+            padding: 10px;
+            border: 1px solid var(--border);
+            z-index: 110;
+        }
+
+        .row { display: flex; gap: 5px; align-items: center; }
+
+        input, select, button {
+            border: 1px solid var(--border);
+            background: #fff;
+            padding: 3px 6px;
+            font-family: var(--font);
+            font-size: 10px;
+            outline: none;
+        }
+
+        button { cursor: pointer; text-transform: uppercase; }
+        button:hover { background: #000; color: #fff; }
+
+        #closeBtn {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            z-index: 110;
+            background: #fff;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            background: #fff;
+            border: 1px solid var(--border);
+            padding: 20px;
+            z-index: 200;
+            text-align: center;
+        }
+
+        #folderIndicator {
+            display: none;
+            font-size: 9px;
+            color: #000;
+            font-weight: bold;
+            margin-bottom: 2px;
+        }
+
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            font-size: 9px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="legend" id="legend"></div>
+    <canvas id="mapCanvas"></canvas>
+
+    <div id="folderModal" class="modal">
+        <div style="font-size: 11px; margin-bottom: 15px;">ENABLE FOLDER STAGING?</div>
+        <div class="row" style="justify-content: center;">
+            <button id="confirmFolder">YES</button>
+            <button onclick="document.getElementById('folderModal').style.display='none'">NO</button>
+        </div>
+    </div>
+
+    <div id="explorerOverlay">
+        <button id="closeBtn">CLOSE</button>
+        <canvas id="explorerCanvas"></canvas>
+        
+        <div class="ui-wrap">
+            <div id="folderIndicator">MODE: FOLDER (<span id="fileCounter">0</span>)</div>
+            
+            <div class="row">
+                <input type="text" id="seed" placeholder="SEED" style="width:60px">
+                <select id="res">
+                    <option value="128">128px</option>
+                    <option value="256">256px</option>
+                    <option value="512">512px</option>
+                </select>
+                <button id="genBtn">GEN</button>
+                <button id="erodeBtn">SMOOTH</button>
+            </div>
+
+            <div class="row">
+                <button id="dl_jpg">STASH JPG</button>
+                <button id="dl_png">STASH PNG</button>
+                <label class="toggle-container">
+                    <input type="checkbox" id="includeTxt" checked> .TXT
+                </label>
+                <button id="makeFolderBtn">FOLDER ON</button>
+                <button id="downloadZipBtn" style="display: none; background: #000; color: #fff;">GET ZIP</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('mapCanvas');
+        const ctx = canvas.getContext('2d');
+        const exOverlay = document.getElementById('explorerOverlay');
+        const exCanvas = document.getElementById('explorerCanvas');
+        const eCtx = exCanvas.getContext('2d');
+
+        const TILES = [
+            { id: 0, name: 'WAT', color: '#0077be' },
+            { id: 1, name: 'SND', color: '#edc9af' },
+            { id: 2, name: 'GRS', color: '#45a049' },
+            { id: 3, name: 'MTN', color: '#7a7a7a' },
+            { id: 4, name: 'SNO', color: '#ffffff' }
+        ];
+
+        let grid = [];
+        let size = 128;
+        let activeSeed = "";
+        let erosionCount = 0;
+        let folderMode = false;
+        let zip = new JSZip();
+        let folderFilesCount = 0;
+
+        // Init Legend
+        TILES.forEach(t => {
+            const el = document.createElement('div');
+            el.className = 'legend-item';
+            el.innerHTML = `<div class="sq" style="background:${t.color}"></div>${t.name}`;
+            document.getElementById('legend').appendChild(el);
+        });
+
+        // --- Perlin-style Noise ---
+        function createNoise(seed) {
+            const p = new Uint8Array(512);
+            let s = 0;
+            for (let i = 0; i < seed.length; i++) s += seed.charCodeAt(i);
+            const lcg = (v) => (v * 1664525 + 1013904223) % 4294967296;
+            let current = s || Math.random() * 1000;
+            for(let i=0; i<256; i++) { current = lcg(current); p[i] = current % 256; }
+            for(let i=0; i<256; i++) p[256+i] = p[i];
+
+            const fade = t => t * t * t * (t * (t * 6 - 15) + 10);
+            const lerp = (t, a, b) => a + t * (b - a);
+            const grad = (hash, x, y) => {
+                const h = hash & 15;
+                const u = h < 8 ? x : y;
+                const v = h < 4 ? y : h === 12 || h === 14 ? x : 0;
+                return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+            };
+
+            return (x, y) => {
+                const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+                x -= Math.floor(x); y -= Math.floor(y);
+                const u = fade(x), v = fade(y);
+                const a = p[X]+Y, aa = p[a], ab = p[a+1], b = p[X+1]+Y, ba = p[b], bb = p[b+1];
+                return lerp(v, lerp(u, grad(p[aa], x, y), grad(p[ba], x-1, y)), 
+                               lerp(u, grad(p[ab], x, y-1), grad(p[bb], x-1, y-1)));
+            };
+        }
+
+        function generate() {
+            size = parseInt(document.getElementById('res').value);
+            canvas.width = canvas.height = size;
+            activeSeed = document.getElementById('seed').value || Math.random().toString();
+            erosionCount = 0;
+            const noise = createNoise(activeSeed);
+            
+            grid = [];
+            for (let y = 0; y < size; y++) {
+                grid[y] = [];
+                for (let x = 0; x < size; x++) {
+                    let nx = x / 30, ny = y / 30;
+                    let v = noise(nx, ny) + 0.5 * noise(nx * 2, ny * 2) + 0.25 * noise(nx * 4, ny * 4);
+                    v = (v + 1) / 2;
+                    if (v < 0.45) grid[y][x] = "#0077be";
+                    else if (v < 0.48) grid[y][x] = "#edc9af";
+                    else if (v < 0.65) grid[y][x] = "#45a049";
+                    else if (v < 0.75) grid[y][x] = "#7a7a7a";
+                    else grid[y][x] = "#ffffff";
+                }
+            }
+            draw(); renderEx();
+        }
+
+        function erode() {
+            erosionCount++;
+            const next = JSON.parse(JSON.stringify(grid));
+            for (let y = 1; y < size - 1; y++) {
+                for (let x = 1; x < size - 1; x++) {
+                    const neighbors = [grid[y-1][x], grid[y+1][x], grid[y][x-1], grid[y][x+1]];
+                    const counts = {};
+                    neighbors.forEach(n => counts[n] = (counts[n] || 0) + 1);
+                    for (let color in counts) { if (counts[color] >= 3) next[y][x] = color; }
+                }
+            }
+            grid = next;
+            draw(); renderEx();
+        }
+
+        function draw() {
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    ctx.fillStyle = grid[y][x];
+                    ctx.fillRect(x, y, 1, 1);
+                }
+            }
+        }
+
+        // Explorer & UI
+        let scale = 1, offset = {x:0, y:0}, isDrag = false, startM = {x:0, y:0};
+        function renderEx() {
+            if (exOverlay.style.display !== 'block') return;
+            eCtx.fillStyle = '#fff'; eCtx.fillRect(0,0,exCanvas.width, exCanvas.height);
+            eCtx.imageSmoothingEnabled = false;
+            eCtx.save();
+            eCtx.translate(offset.x, offset.y); eCtx.scale(scale, scale);
+            eCtx.drawImage(canvas, 0, 0);
+            eCtx.restore();
+        }
+
+        canvas.onclick = () => {
+            exOverlay.style.display = 'block';
+            exCanvas.width = window.innerWidth; exCanvas.height = window.innerHeight;
+            scale = (window.innerHeight / size) * 0.75;
+            offset = {x: (window.innerWidth - size*scale)/2, y: (window.innerHeight - size*scale)/2};
+            renderEx();
+        };
+
+        async function handleDownload(format) {
+            const fileId = Date.now();
+            const includeTxt = document.getElementById('includeTxt').checked;
+            const dlCanvas = document.createElement('canvas');
+            dlCanvas.width = size; dlCanvas.height = size;
+            const dCtx = dlCanvas.getContext('2d');
+            dCtx.drawImage(canvas, 0, 0);
+            
+            const mime = format === 'jpg' ? 'image/jpeg' : 'image/png';
+            const imgData = dlCanvas.toDataURL(mime);
+            const metadata = `SPDVAULT\nID: #${fileId}\nSeed: ${activeSeed}\nSize: ${size}\nSmooth Passes: ${erosionCount}`;
+
+            if (folderMode) {
+                const imgBlob = await (await fetch(imgData)).blob();
+                const folder = zip.folder("Maps");
+                folder.file(`${fileId}.${format}`, imgBlob);
+                if (includeTxt) folder.file(`${fileId}.txt`, metadata);
+                folderFilesCount++;
+                document.getElementById('fileCounter').innerText = folderFilesCount;
+            } else {
+                const imgLink = document.createElement('a');
+                imgLink.href = imgData; imgLink.download = `${fileId}.${format}`;
+                imgLink.click();
+                if (includeTxt) {
+                    const blob = new Blob([metadata], { type: 'text/plain' });
+                    const txtLink = document.createElement('a');
+                    txtLink.href = URL.createObjectURL(blob);
+                    txtLink.download = `${fileId}.txt`;
+                    txtLink.click();
+                }
+            }
+        }
+
+        document.getElementById('makeFolderBtn').onclick = () => document.getElementById('folderModal').style.display = 'block';
+        document.getElementById('confirmFolder').onclick = () => {
+            folderMode = true;
+            document.getElementById('folderModal').style.display = 'none';
+            document.getElementById('makeFolderBtn').style.display = 'none';
+            document.getElementById('downloadZipBtn').style.display = 'inline-block';
+            document.getElementById('folderIndicator').style.display = 'block';
+        };
+
+        document.getElementById('downloadZipBtn').onclick = async () => {
+            if (folderFilesCount === 0) return;
+            const content = await zip.generateAsync({type:"blob"});
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(content);
+            link.download = "Map_Collection.zip";
+            link.click();
+        };
+
+        document.getElementById('closeBtn').onclick = () => exOverlay.style.display = 'none';
+        document.getElementById('genBtn').onclick = () => generate();
+        document.getElementById('erodeBtn').onclick = () => erode();
+        document.getElementById('dl_jpg').onclick = () => handleDownload('jpg');
+        document.getElementById('dl_png').onclick = () => handleDownload('png');
+
+        exCanvas.onmousedown = e => { isDrag = true; startM = {x:e.clientX - offset.x, y:e.clientY - offset.y}; };
+        window.onmousemove = e => { if(isDrag && exOverlay.style.display === 'block') { offset.x = e.clientX - startM.x; offset.y = e.clientY - startM.y; renderEx(); } };
+        window.onmouseup = () => isDrag = false;
+        exCanvas.onwheel = e => {
+            const f = e.deltaY > 0 ? 0.9 : 1.1;
+            const mx = (e.clientX - offset.x) / scale, my = (e.clientY - offset.y) / scale;
+            scale *= f;
+            offset.x = e.clientX - mx * scale; offset.y = e.clientY - my * scale;
+            renderEx();
+        };
+
+        window.onload = () => generate();
+// make sure this is HTML
+    </script>
+</body>
+</html>
